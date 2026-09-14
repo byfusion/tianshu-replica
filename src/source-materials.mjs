@@ -1,7 +1,8 @@
 import fs from "node:fs";
 import { parseSourceOutline } from "./replication.mjs";
 
-export function normalizeSourceMaterials(value, expectedEpisodes) {
+// Omitted expectedEpisodes infers the source count, never the planned output count.
+export function normalizeSourceMaterials(value, expectedEpisodes = undefined) {
   if (!value || typeof value !== "object" || Array.isArray(value)) {
     throw new Error("源材料必须是包含 creative、characters、outline、provenance 的 JSON 对象");
   }

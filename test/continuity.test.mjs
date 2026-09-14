@@ -3,9 +3,57 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
-import { commitContinuityReview, continuityContext, continuityIsAccepted, extractContinuityUpdate, invalidateContinuityFrom, stageContinuityProposal } from "../src/continuity.mjs";
+import vm from "node:vm";
+import { commitContinuityReview, continuityContext, continuityIsAccepted, extractContinuityUpdate, invalidateContinuityFrom, observedSnapshotReferences, reviewContinuityUpdate, stageContinuityProposal } from "../src/continuity.mjs";
 import { createRun, readJson, readText, sha, writeJson, writeText } from "../src/core.mjs";
 import { assertContinuityChain } from "../src/runtime.mjs";
+import { produceScripts } from "../src/agents.mjs";
+import { Type, defineTool } from "../src/experiments/lib.mjs";
+import { parseSourceOutline } from "../src/replication.mjs";
+
+async function capturedDynamicSnapshots(snapshot) {
+  const captured = {};
+  for (const [role, original] of [["Writer", produceScripts], ["ContinuityAgent", reviewContinuityUpdate]]) {
+    let prompt;
+    const stop = new Error("offline prompt captured");
+    const run = vm.runInNewContext(`(${original.toString()})`, {
+      planningBudgetGuidance: () => "", episodeMapContext: () => "",
+      Type, defineTool, path, parseSourceOutline, observedSnapshotReferences, fs: { existsSync: () => false }, process: { env: { TIANSHU_MODEL_PROVIDER: "deepseek" } },
+      loadManifest: () => ({ state: "screenplay_producing", episodes: 32 }), saveManifest: () => {},
+      readJson: () => ({ episodes: 32 }),
+      readText: (file) => file.endsWith("outline.md") ? Array.from({ length: 32 }, (_, index) => `## 第${index + 1}集\n已批准的本集计划。`).join("\n\n") : file.endsWith("ledger.json") ? '{"names":[]}' : file.endsWith("market.json") ? '{}' : "已确认的静态材料。",
+      canonicalPersonNames: () => [], loadProductionContract: () => ({ revision: { maxContinuityRepairAttempts: 2 } }),
+      productionContractDigest: () => "test-contract", productionContractMarkdown: () => "静态生产合同。",
+      batches: () => [{ from: 12, to: 12 }], artifactTools: () => [], ep: (episode) => String(episode).padStart(2, "0"),
+      taskPath: (root, id) => path.join(root, "tasks", `${id}.json`),
+      continuityContext: () => ({ contract: "静态连续性合同。", current: { snapshot, snapshotDigest: "test-previous-state", lastEpisode: 11 } }),
+      sampleContext: () => "", outlineWindow: () => "本集与相邻集大纲。", replicationWriterContext: () => "",
+      createPiExperimentSession: async (options) => {
+        assert.equal(options.maxOutputTokens, role === "ContinuityAgent" ? 65536 : undefined);
+        if (role === "ContinuityAgent") assert.equal(options.thinkingLevel, "low");
+        return { session: { dispose() {} }, metrics: {} };
+      },
+      promptWithWatchdog: async (_session, _metrics, value) => { prompt = value; throw stop; },
+      writeBatchMetrics: () => {}, appendMetrics: () => {},
+    });
+    await assert.rejects(run("/offline-not-written", { episode: 12, screenplay: "本集正式剧本。", proposedUpdate: "本集提交的状态变化。" }), (error) => error === stop);
+    const start = role === "Writer" ? "截至上一集的动态连续性快照：\n" : "上一集动态快照：\n";
+    const end = role === "Writer" ? "\n\n本集及相邻集大纲：" : "\n\nWriter 提交的本集变化：";
+    captured[role] = prompt.split(start)[1].split(end)[0];
+  }
+  return captured;
+}
+
+test("Writer and ContinuityAgent receive the complete long previous snapshot including its final constraint", async () => {
+  const finalConstraint = "末尾关键约束：Maya 尚不知道保险柜密码；钥匙仍由 Noah 保管。";
+  const snapshot = `客观事实与人物认知：\n${"既有事实和人物认知保持上一集已经确认的状态。\n".repeat(650)}${finalConstraint}`;
+  assert.ok(snapshot.length > 12000);
+  const captured = await capturedDynamicSnapshots(snapshot);
+  assert.deepEqual(Object.fromEntries(Object.entries(captured).map(([role, value]) => [role, value.length])), { Writer: snapshot.length, ContinuityAgent: snapshot.length });
+  assert.equal(captured.Writer, snapshot);
+  assert.equal(captured.ContinuityAgent, snapshot);
+  assert.ok(captured.Writer.endsWith(finalConstraint) && captured.ContinuityAgent.endsWith(finalConstraint));
+});
 
 function screenplay(episode, update) {
   return `# 第${episode}集｜EP${String(episode).padStart(2, "0")}\n\n## 场景一\n\nMAYA（中）：钥匙在我这里。\nMAYA（EN）：I have the key.\n\n## 【本集钩子】\n门被打开。\n\n## 【连续性检查】\n${update}`;

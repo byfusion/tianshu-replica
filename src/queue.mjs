@@ -1,9 +1,16 @@
 import fs from "node:fs";
 import path from "node:path";
 import { spawn } from "node:child_process";
+import { fileURLToPath } from "node:url";
+import { textModelForRun } from "./execution-contract.mjs";
+import { credentialsForTextModel } from "./model-profiles.mjs";
 
-const RUNNABLE = new Set(["approved", "screenplay_producing", "screenplay_reviewing", "screenplay_passed", "storyboard_producing", "storyboard_reviewing", "final_review", "ready_to_deliver"]);
+const CLI_ENTRY = fileURLToPath(new URL("../bin/tianshu.mjs", import.meta.url));
+
+const RUNNABLE = new Set(["approved", "screenplay_producing", "screenplay_reviewing", "screenplay_passed", "storyboard_producing", "storyboard_reviewing", "final_review"]);
 const PAUSED = new Map([["awaiting_approval", "awaiting_outline_approval"], ["needs_human_review", "needs_human_review"], ["awaiting_delivery_approval", "awaiting_delivery_approval"], ["delivered", "awaiting_producer_review"]]);
+const RESUMABLE_JOBS = new Set(["queued", "waiting_for_run_lock", "awaiting_outline_approval", "needs_human_review", "awaiting_delivery_approval"]);
+export const DEFAULT_DRAIN_MAX_JOBS = 10;
 const now = () => new Date().toISOString();
 const queueDir = (root) => path.join(path.resolve(root), ".queue");
 const lockFile = (root) => path.join(queueDir(root), "worker.lock");
@@ -102,6 +109,7 @@ export function retryJob(root, runId) {
     job.manifestState = manifest(root, runId).state;
     job.state = "queued";
     job.error = null;
+    delete job.errorCode;
     delete job.lockOwner;
     writeJob(root, job);
     return { retried: true, job };
@@ -111,8 +119,10 @@ export function retryJob(root, runId) {
 function classify(job, current) {
   job.manifestState = current.state;
   job.error = null;
+  delete job.errorCode;
   delete job.lockOwner;
   if (PAUSED.has(current.state)) { job.state = PAUSED.get(current.state); return null; }
+  if (current.state === "ready_to_deliver") { job.state = "queued"; return "deliver"; }
   if (["draft", "planning"].includes(current.state)) { job.state = "queued"; return "plan"; }
   if (["screenplay_repairing", "storyboard_repairing"].includes(current.state)) { job.state = "queued"; return "repair"; }
   if (RUNNABLE.has(current.state)) { job.state = "queued"; return "run"; }
@@ -122,69 +132,137 @@ function classify(job, current) {
 }
 
 async function executeCli({ root, runId, action, env }) {
-  if (!env.PI_CODING_AGENT_DIR?.trim()) throw new Error("PI_CODING_AGENT_DIR must explicitly select company credentials before generation");
   return await new Promise((resolve, reject) => {
-    const child = spawn(process.execPath, [path.join(root, "bin", "tianshu.mjs"), action, runId], { cwd: root, env, stdio: ["ignore", "ignore", "inherit"] });
+    const child = spawn(process.execPath, [CLI_ENTRY, "--root", root, action, runId], { cwd: root, env, stdio: ["ignore", "ignore", "inherit"] });
     child.once("error", reject);
     child.once("exit", (code, signal) => resolve({ code, signal }));
   });
 }
 
-export async function runWorkerOnce(root, { execute = executeCli, env = process.env } = {}) {
+function failJob(job, error) {
+  job.state = error.code === "TIANSHU_LEGACY_UNBOUND" ? "stopped" : "failed";
+  job.error = error.message;
+  if (error.code) job.errorCode = error.code;
+}
+
+function environmentForJob(root, job, env) {
+  const selected = textModelForRun(resolveQueuedRun(root, job.runId));
+  const credentials = credentialsForTextModel(selected);
+  if (!credentials.configured) {
+    const error = new Error(`frozen ${selected.provider}/${selected.id} credentials are not configured in PI_CODING_AGENT_DIR ${selected.agentDir || "(unbound)"}; configure this run's account before explicit retry`);
+    error.code = "TIANSHU_MODEL_NOT_CONFIGURED";
+    throw error;
+  }
+  return { ...env, TIANSHU_MODEL: selected.family, TIANSHU_MODEL_PROVIDER: selected.provider, TIANSHU_MODEL_ID: selected.id, PI_CODING_AGENT_DIR: selected.agentDir };
+}
+
+async function processQueuedJob(root, job, { execute, env }) {
+  if (job.state === "running") {
+    job.state = "failed";
+    job.error = "worker ended before recording a result; usage may be unknown; explicit retry required";
+    writeJob(root, job);
+    return { selected: false, processed: false, job };
+  }
+  // Only known resumable states are eligible. User/account pauses and unknown
+  // queue states remain intact until their owner explicitly resolves them.
+  if (!RESUMABLE_JOBS.has(job.state)) return null;
+  let action;
+  try { action = classify(job, manifest(root, job.runId)); }
+  catch (error) { failJob(job, error); }
+  writeJob(root, job);
+  if (!action) return { selected: false, processed: false, job };
+  const runLock = readLock(path.join(resolveQueuedRun(root, job.runId), ".lock"));
+  if (runLock) {
+    job.state = "waiting_for_run_lock";
+    job.lockOwner = runLock;
+    job.error = "run lock is preserved; use lock-status and the existing unlock-stale procedure";
+    writeJob(root, job);
+    return { selected: false, processed: false, job };
+  }
+  let jobEnv;
+  // Delivery runs the native local gate/export only; historical output can be
+  // exported without binding a future model or configuring paid generation.
+  try { jobEnv = action === "deliver" ? { ...env } : environmentForJob(root, job, env); }
+  catch (error) {
+    failJob(job, error);
+    writeJob(root, job);
+    return { selected: true, processed: false, action, job };
+  }
+  job.state = "running";
+  job.startedAt = now();
+  job.attempts += 1;
+  writeJob(root, job);
+  try {
+    // Manual review leaves passed tasks intact until repair marks its targets
+    // stale. Re-read its resulting state before starting any generation.
+    const commands = action === "repair" ? ["repair", "run"] : [action];
+    for (const command of commands) {
+      if (command === "run" && action === "repair") {
+        const next = classify(job, manifest(root, job.runId));
+        if (!next) break;
+        if (next !== "run") throw new Error(`CLI repair returned without a runnable or handoff state (${job.manifestState}); explicit retry required`);
+        job.state = "running";
+        writeJob(root, job);
+      }
+      const result = await execute({ root, runId: job.runId, action: command, env: jobEnv });
+      const recorded = JSON.parse(fs.readFileSync(jobFile(root, job.runId), "utf8"));
+      if (recorded.state !== "running") {
+        // A pause recorded while the child was active controls subsequent
+        // work, including repair -> run. Do not overwrite its owner's state.
+        recorded.finishedAt = now();
+        writeJob(root, recorded);
+        return { selected: true, processed: true, action, job: recorded };
+      }
+      if (result?.code !== 0) throw new Error(`CLI ${command} failed (${result?.signal || `exit ${result?.code ?? "unknown"}`}); no automatic retry`);
+    }
+    const next = classify(job, manifest(root, job.runId));
+    if (next) throw new Error(`CLI ${action} returned without reaching a handoff state (${job.manifestState}); explicit retry required`);
+  } catch (error) { failJob(job, error); }
+  job.finishedAt = now();
+  writeJob(root, job);
+  return { selected: true, processed: true, action, job };
+}
+
+async function withWorker(root, work) {
   root = path.resolve(root);
   const lock = acquireWorker(root);
   if (!lock.acquired) return { busy: true, owner: lock.owner, action: "inspect the exact worker owner; explicit retry is required after an exited worker" };
-  try {
+  try { return await work(root); }
+  finally { releaseWorker(root); }
+}
+
+export async function runWorkerOnce(root, { execute = executeCli, env = process.env } = {}) {
+  return withWorker(root, async (resolvedRoot) => {
+    root = resolvedRoot;
     for (const job of readJobs(root)) {
-      if (["failed", "stopped", "awaiting_producer_review"].includes(job.state)) continue;
-      if (job.state === "running") {
-        job.state = "failed";
-        job.error = "worker ended before recording a result; usage may be unknown; explicit retry required";
-        writeJob(root, job);
-        continue;
+      const result = await processQueuedJob(root, job, { execute, env });
+      if (result?.selected) {
+        const { selected, ...once } = result;
+        return once;
       }
-      let action;
-      try { action = classify(job, manifest(root, job.runId)); }
-      catch (error) { job.state = "failed"; job.error = error.message; }
-      writeJob(root, job);
-      if (!action) continue;
-      const runLock = readLock(path.join(resolveQueuedRun(root, job.runId), ".lock"));
-      if (runLock) {
-        job.state = "waiting_for_run_lock";
-        job.lockOwner = runLock;
-        job.error = "run lock is preserved; use lock-status and the existing unlock-stale procedure";
-        writeJob(root, job);
-        continue;
-      }
-      if (execute === executeCli && !env.PI_CODING_AGENT_DIR?.trim()) {
-        job.state = "failed";
-        job.error = "PI_CODING_AGENT_DIR must explicitly select company credentials before generation";
-        writeJob(root, job);
-        return { processed: false, job };
-      }
-      job.state = "running";
-      job.startedAt = now();
-      job.attempts += 1;
-      writeJob(root, job);
-      try {
-        // Manual review leaves passed tasks intact until repair marks its targets stale.
-        for (const command of action === "repair" ? ["repair", "run"] : [action]) {
-          const result = await execute({ root, runId: job.runId, action: command, env });
-          if (result?.code !== 0) throw new Error(`CLI ${command} failed (${result?.signal || `exit ${result?.code ?? "unknown"}`}); no automatic retry`);
-        }
-        const next = classify(job, manifest(root, job.runId));
-        if (next) {
-          job.state = "failed";
-          job.error = `CLI ${action} returned without reaching a handoff state (${job.manifestState}); explicit retry required`;
-        }
-      } catch (error) {
-        job.state = "failed";
-        job.error = error.message;
-      }
-      job.finishedAt = now();
-      writeJob(root, job);
-      return { processed: true, action, job };
     }
     return { processed: false, jobs: readJobs(root) };
-  } finally { releaseWorker(root); }
+  });
+}
+
+export async function runWorkerDrain(root, { maxJobs = DEFAULT_DRAIN_MAX_JOBS, execute = executeCli, env = process.env } = {}) {
+  if (!Number.isSafeInteger(maxJobs) || maxJobs < 1) throw new Error("--max-jobs must be a finite positive safe integer");
+  return withWorker(root, async (resolvedRoot) => {
+    // This snapshot bounds the drain and gives each job at most one attempt.
+    // Newly enqueued jobs belong to the next invocation.
+    const snapshot = readJobs(resolvedRoot), results = [];
+    let selected = 0, processed = 0;
+    for (const { runId } of snapshot) {
+      if (selected >= maxJobs) break;
+      // Retain snapshot membership, but honor pauses or approvals recorded
+      // while earlier jobs were running.
+      const job = JSON.parse(fs.readFileSync(jobFile(resolvedRoot, runId), "utf8"));
+      const result = await processQueuedJob(resolvedRoot, job, { execute, env });
+      if (!result) continue;
+      results.push(result);
+      if (result.selected) selected++;
+      if (result.processed) processed++;
+    }
+    return { processed, selected, maxJobs, limitReached: selected >= maxJobs, results, jobs: readJobs(resolvedRoot) };
+  });
 }

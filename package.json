@@ -10,7 +10,7 @@
     "tianshu": "node bin/tianshu.mjs",
     "worker": "node bin/tianshu-worker.mjs",
     "test": "node --test --test-concurrency=1 test/*.test.mjs",
-    "test:replication": "node --test --test-concurrency=1 test/replication.test.mjs test/metrics.test.mjs test/replication-integration.test.mjs test/source-input.test.mjs test/extract-outline.test.mjs test/sample.test.mjs test/sample-integration.test.mjs test/semantic-review.test.mjs test/planning-resume.test.mjs test/source-materials.test.mjs test/extract-source.test.mjs test/source-materials-integration.test.mjs test/extract-video.test.mjs test/source-materials-cli.test.mjs",
+    "test:replication": "npm test",
     "check:environment": "node scripts/check-environment.mjs",
     "experiment:session": "node src/session-topology-experiment.mjs",
     "experiment:e1": "node src/experiments/e1-artifact-workspace.mjs",
@@ -22,6 +22,6 @@
     "experiment:continuity-smoke": "node src/experiments/continuity-smoke.mjs"
   },
   "dependencies": {
-    "@earendil-works/pi-coding-agent": "0.84.2"
+    "@earendil-works/pi-coding-agent": "0.85.1"
   }
 }

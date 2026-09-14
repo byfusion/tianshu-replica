@@ -10,7 +10,7 @@
   },
   "screenplay": {
     "episodeDurationSeconds": {
-      "min": 50,
+      "min": 60,
       "max": 75
     },
     "maxScenes": 4,
@@ -18,7 +18,7 @@
   },
   "storyboard": {
     "episodeDurationSeconds": {
-      "min": 50,
+      "min": 60,
       "max": 75
     },
     "shotCount": {

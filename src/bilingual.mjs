@@ -17,6 +17,14 @@ function isLanguageNeutral(value) {
   return words.length > 1 && words.every((word) => word.length === 1 || /^[A-Z][a-z]*$/.test(word));
 }
 
+function isCanonicalNameCall(value, canonicalNames) {
+  const words = value.match(/[A-Za-z]+/g) || [];
+  const remainder = value.replace(/[A-Za-z]+/g, "");
+  if (!words.length || !/^[\s\p{P}]*$/u.test(remainder)) return false;
+  const nameWords = new Set(canonicalNames.flatMap((name) => String(name).match(/[A-Za-z]+/g) || []).map((word) => word.toLowerCase()));
+  return words.every((word) => nameWords.has(word.toLowerCase()));
+}
+
 function unique(items) { return [...new Set(items)]; }
 
 export function dialogueCellErrors(cell, context = "台词格") {
@@ -78,7 +86,7 @@ function markerEvents(line) {
   }));
 }
 
-export function screenplayBilingualErrors(markdown) {
+export function screenplayBilingualErrors(markdown, canonicalNames = []) {
   const events = [];
   const obviousUnmarked = [];
   const lines = String(markdown).split("\n");
@@ -95,7 +103,7 @@ export function screenplayBilingualErrors(markdown) {
     if (event.kind === "zh") {
       if (pending) errors.push(`剧本第 ${pending.line} 行中文台词缺少对应英文`);
       pending = event;
-      if (!HAN.test(event.value)) errors.push(`剧本第 ${event.line} 行中文标记后没有真实中文`);
+      if (!HAN.test(event.value) && !isCanonicalNameCall(event.value, canonicalNames)) errors.push(`剧本第 ${event.line} 行中文标记后没有真实中文`);
       continue;
     }
     if (!pending) errors.push(`剧本第 ${event.line} 行英文台词缺少对应中文`);

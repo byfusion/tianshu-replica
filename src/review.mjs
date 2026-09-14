@@ -53,7 +53,9 @@ export function semanticRepairPlan(findings, {
 }) {
   const normalized = findings.map((finding) => normalizeSemanticFinding(finding, { stage, totalEpisodes, requireP2Disposition }));
   const repeated = new Set(priorFindingIds);
-  const blockers = normalized.filter((finding) => finding.severity === "P0" || (stage !== "planning" && ["series", "upstream"].includes(finding.scope)));
+  const blockers = normalized.filter((finding) => finding.severity === "P0" || (
+    finding.disposition === "repair" && stage !== "planning" && ["series", "upstream"].includes(finding.scope)
+  ));
   const categories = new Map();
   for (const finding of normalized.filter((item) => item.severity !== "P2" || item.disposition === "repair")) {
     if (finding.episode > 0) categories.set(finding.category, new Set([...(categories.get(finding.category) || []), finding.episode]));

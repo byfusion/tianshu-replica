@@ -4,6 +4,7 @@ import { Type, createPiExperimentSession, defineTool, promptWithWatchdog, writeJ
 import { appendRunMetrics, readRunMetrics } from "./metrics.mjs";
 import { loadSourceEpisodes } from "./source-input.mjs";
 import { normalizeSourceMaterials } from "./source-materials.mjs";
+import { sourceAttractionGuidance } from "./attraction.mjs";
 
 const evidenceRules = `仅以提供的文本为依据，不声称直接看过或验证过原片。保留原人物姓名、关系和角色功能；不同姓名或称谓是否为同一人未明确时，逐项标为未知，不自行合并或建立别名对应。
 只提取原文可举证的身份、关系、行为动机和性格。缺失背景、年龄、关系和后续结局写“未知”或不展开，不补人物身世，不先做改名、市场适配或自由创作。
@@ -13,11 +14,13 @@ const evidenceRules = `仅以提供的文本为依据，不声称直接看过或
 const extractionInstructions = `你是天书源材料提取员。根据这批源剧文本同时提取三项材料：创意、人物小传、分集大纲，供后续天书基于这三项材料重新写剧本。
 创意概括原片可见的故事前提、主冲突和戏剧驱动力，不另创卖点或主线；人物小传保留已证实的人物区别，避免串角。
 分集大纲逐集保留核心事件、主冲突、反转、结尾状态和钩子。倒叙、插叙保持原集和播出顺序，说明时间层次，不按故事时间重排，不替片段补结局。
-只保留改变局面的节点，通常每集2–4个核心事件；不逐镜复述，不抄整段对白，不带无关服装和运镜细节。每集约150–300个中文字符是软目标，不能为压缩漏掉核心事实。
+通常每集2–4个核心事件，同时保留承载人物和情绪的关键互动；不逐镜复述，不抄整段对白，不带无关服装和运镜细节。每集约150–300个中文字符是软目标，不能为压缩漏掉核心事实和关键互动。
+${sourceAttractionGuidance}
 ${evidenceRules}
 使用 submit_source_materials 一次提交这批的三项材料；原文未明确的反转或钩子写“未知”，已明确没有的可以如实说明。`;
 
 const consolidationInstructions = `你是天书源材料整理员。只合并已经提取的创意和人物小传，去重并保留来源依据、跨集变化及所有会改变身份对应和事件因果的疑点。
+保留已提取的人物说话习惯、互动、情绪表达及其来源短例，不把它们简化成只有身份和事件的摘要；吸引力作用的推断继续标为推断。
 不得新增事实、人物关系或背景，不把证据不足的相似称谓合并成人物，不根据后续可能发生的剧情推断先前未知的信息。
 分集大纲已经冻结，不在此步骤重写。只用 submit_source_identity 提交 creative 与 characters 两项文本。
 ${evidenceRules}`;

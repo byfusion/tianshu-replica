@@ -139,6 +139,50 @@ export function createProductionContract(overrides = {}) {
   return contract;
 }
 
+export function replicationContractErrors(contract) {
+  const errors = validateProductionContract(contract);
+  if (errors.length) return errors;
+  for (const stage of ["screenplay", "storyboard"]) {
+    const range = contract[stage].episodeDurationSeconds;
+    if (range.min < 60 || range.max > 100) {
+      errors.push(`new full-series replication requires ${stage}.episodeDurationSeconds within 60–100 seconds; split the source into more output episodes instead of extending individual episodes`);
+    }
+  }
+  const screenplay = contract.screenplay.episodeDurationSeconds;
+  const storyboard = contract.storyboard.episodeDurationSeconds;
+  if (screenplay.min !== storyboard.min || screenplay.max !== storyboard.max) {
+    errors.push("replication screenplay and storyboard episode-duration ranges must match");
+  }
+  if (contract.pacing?.targetDurationSeconds.max > 90) errors.push("new full-series replication target duration must not exceed 90 seconds");
+  return errors;
+}
+
+export function createReplicationProductionContract(overrides = {}) {
+  const settings = merge({
+    contractVersion: "source-replication-short-episodes@2",
+    profile: "source-replication-short-episodes",
+    screenplay: { episodeDurationSeconds: { min: 60, max: 100 } },
+    storyboard: {
+      episodeDurationSeconds: { min: 60, max: 100 },
+      shotCount: { min: 8, max: 32 },
+    },
+  }, overrides);
+  if (settings?.pacing === undefined && settings && typeof settings === "object" && !Array.isArray(settings)) {
+    const screenplay = settings.screenplay?.episodeDurationSeconds;
+    const storyboard = settings.storyboard?.episodeDurationSeconds;
+    const min = Math.max(60, screenplay?.min ?? 60, storyboard?.min ?? 60);
+    const max = Math.min(90, screenplay?.max ?? 100, storyboard?.max ?? 100);
+    settings.pacing = {
+      targetDurationSeconds: { min, max },
+      preferredDurationSeconds: Math.min(max, Math.max(min, 75)),
+    };
+  }
+  const contract = createProductionContract(settings);
+  const errors = replicationContractErrors(contract);
+  if (errors.length) throw new Error(`invalid replication contract: ${errors.join("; ")}`);
+  return contract;
+}
+
 export function createLegacyProductionContract(overrides = {}) {
   const contract = merge(LEGACY_CONTRACT, overrides);
   const errors = validateProductionContract(contract);
@@ -173,6 +217,25 @@ export function validateProductionContract(contract) {
     range(errors, contract.storyboard.episodeDurationSeconds, "storyboard.episodeDurationSeconds", 1);
     range(errors, contract.storyboard.shotCount, "storyboard.shotCount", 1);
     range(errors, contract.storyboard.shotDurationSeconds, "storyboard.shotDurationSeconds", 1);
+  }
+
+  if (contract.pacing !== undefined) {
+    if (!contract.pacing || typeof contract.pacing !== "object" || Array.isArray(contract.pacing)) errors.push("pacing must be an object");
+    else {
+      const target = contract.pacing.targetDurationSeconds;
+      const preferred = contract.pacing.preferredDurationSeconds;
+      range(errors, target, "pacing.targetDurationSeconds", 1);
+      integer(errors, preferred, "pacing.preferredDurationSeconds", 1);
+      for (const stage of ["screenplay", "storyboard"]) {
+        const hard = contract[stage]?.episodeDurationSeconds;
+        if (target && hard && (target.min < hard.min || target.max > hard.max)) {
+          errors.push(`pacing.targetDurationSeconds must be within ${stage}.episodeDurationSeconds`);
+        }
+      }
+      if (target && Number.isInteger(preferred) && (preferred < target.min || preferred > target.max)) {
+        errors.push("pacing.preferredDurationSeconds must be within pacing.targetDurationSeconds");
+      }
+    }
   }
 
   if (!contract.promotion || typeof contract.promotion !== "object") errors.push("promotion must be an object");
@@ -232,17 +295,34 @@ export function productionContractDigest(contract) {
   return crypto.createHash("sha256").update(JSON.stringify(stableValue(contract))).digest("hex");
 }
 
+export function episodeDurationPolicy(contract) {
+  const hard = contract.storyboard.episodeDurationSeconds;
+  return {
+    target: clone(contract.pacing?.targetDurationSeconds ?? hard),
+    preferred: contract.pacing?.preferredDurationSeconds ?? null,
+    hard: clone(hard),
+  };
+}
+
 export function productionContractMarkdown(contract) {
   const errors = validateProductionContract(contract);
   if (errors.length) throw new Error(`cannot render invalid production contract: ${errors.join("; ")}`);
   const episodes = contract.promotion.requiredEpisodes.length ? contract.promotion.requiredEpisodes.map((episode) => `EP${episode}`).join("、") : "不强制";
   const rounds = contract.revision.maxSemanticRounds;
+  const duration = episodeDurationPolicy(contract);
+  const durationLines = contract.pacing === undefined
+    ? [`- 每集目标时长：${duration.hard.min}–${duration.hard.max} 秒`]
+    : [
+      `- 每集目标时长：${duration.target.min}–${duration.target.max} 秒`,
+      `- 每集推荐时长：${duration.preferred} 秒`,
+      `- 每集硬性时长：${duration.hard.min}–${duration.hard.max} 秒（上限 ${duration.hard.max} 秒）`,
+    ];
   return [
     `# Production Contract｜${contract.profile}`,
     "",
     `- 合同版本：${contract.contractVersion}（schema ${contract.schemaVersion}）`,
     `- 模式：${contract.legacy ? "旧项目兼容模式" : contract.format.audience === "female" ? "女频竖屏短剧" : "竖屏短剧（受众未指定）"}`,
-    `- 每集目标时长：${contract.storyboard.episodeDurationSeconds.min}–${contract.storyboard.episodeDurationSeconds.max} 秒`,
+    ...durationLines,
     `- 每集镜头：${contract.storyboard.shotCount.min}–${contract.storyboard.shotCount.max} 镜；单镜 ${contract.storyboard.shotDurationSeconds.min}–${contract.storyboard.shotDurationSeconds.max} 秒`,
     `- 剧本限制：最多 ${contract.screenplay.maxScenes} 场；英文对白最多 ${contract.screenplay.englishDialogueWordLimit} 词`,
     `- 宣发要求：${episodes}${contract.promotion.requireSemanticHook ? ` 必须在前 ${contract.promotion.coldOpenWithinSeconds} 秒建立语义冷开和可剪宣发钩子` : " 无强制冷开要求"}`,
