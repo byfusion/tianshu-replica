@@ -93,6 +93,20 @@ DeepSeek 抽帧材料到规划、剧本、分镜和文档交付的链路已完�
 
 “通过”要求当前合同下的硬检查全部成功、独立终审没有 P0/P1，所有 P2 都已修复或标记为 `accepted_non_blocking`。遇到 P0、需要改已批准大纲的上游问题、同类问题影响至少 3 集、相同 finding 修后仍存在或修订轮次用尽时，任务进入 `needs_human_review`。Reviewer 没有正式提交或暂时不可用时，流程停在当前 reviewing 状态并保留恢复点，不会假装通过。
 
+## 阅读代码
+
+从 CLI 入口沿生产顺序阅读即可，不需要先理解全部模块：
+
+| 要了解的行为 | 入口与职责 |
+| --- | --- |
+| 命令如何进入生产流程 | `bin/tianshu.mjs` 解析参数、选择数据目录并调用相应操作；`src/runtime.mjs` 推进完整生产流程。 |
+| 多部剧如何并行 | `src/queue.mjs` 管理各剧任务；`src/request-slots.mjs` 与 `scripts/provider_slots.py` 管理共享 GPT 请求槽。 |
+| 如何规划、写作和制作分镜 | `src/agents.mjs` 编排各阶段；提示词单独放在 `src/agent-prompts.mjs`，提交工具负责校验和保存正式稿。 |
+| 如何独立审稿与恢复 | `src/semantic-review.mjs` 组织窗口审稿、检查点复用与全剧终审；`src/review-prompts.mjs` 集中审稿提示词。 |
+| 如何验证并交付 | `src/core.mjs` 检查分镜、组装交付文本；`src/delivery.mjs` 执行交付门禁与文件导出。 |
+
+关键编排测试直接导入正式模块，通过可选参数替换模型调用，使用合成材料和临时目录验证状态与产物。阅读测试时，先看场景、调用和断言，再看 fixture 的材料准备。
+
 ## 使用
 
 使用 Node ≥22.19，克隆仓库后安装依赖并运行离线测试：
