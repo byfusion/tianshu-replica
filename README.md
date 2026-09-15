@@ -45,6 +45,22 @@ node bin/tianshu-worker.mjs --root /absolute/data drain --max-jobs 10
 TIANSHU_PYTHON=/absolute/python-with-docx npm test
 ```
 
+### GPT 并发与缓存
+
+GPT 与 DeepSeek 分镜默认由 8 路动态领取待做集，完成一集立即补位；每个独立会话最多复用 5 集后轮换。已通过且源稿与合同仍匹配的分镜在创建会话前跳过。窗口审稿保持 8 路独立会话，全剧终审等待全部窗口完成。Writer 与连续性审查依照剧情依赖逐集执行。
+
+`worker drain` 默认并行推进最多 8 部独立剧目，可用 `--concurrency 1–8` 调整；`--max-jobs` 继续限定本轮最多领取的剧目数。每部剧最多尝试一次，审批、暂停、失败和冻结模型按各剧分别处理。
+
+同一数据目录下，所有 GPT 进程共用 `.provider-slots/gpt-requests` 的 8 个 FIFO 请求槽。槽覆盖一个逻辑 stream 及其顺序重试，排队时间不计入任务 watchdog；该上限与并发指标以逻辑 stream 计数。多剧需使用同一个 `--root`，不同数据目录的请求池互相独立。
+
+同剧同类角色使用稳定的 `prompt_cache_key`，各会话仍保持独立。审稿的公共材料放在窗口正文前，尾窗使用相同工具定义。缓存键仅是服务端路由提示，当前正文始终完整发送，真实命中以返回的 `cacheRead` 为准。完成的分镜及窗口审稿继续沿用既有恢复检查点。
+
+定向离线验证（需要 Node 与支持 `fcntl` 的 Python）：
+
+```bash
+node --test --test-concurrency=1 test/concurrency.test.mjs test/request-slots.test.mjs test/model-request-concurrency.test.mjs test/storyboard-concurrency.test.mjs test/review-window-concurrency.test.mjs test/prompt-cache.test.mjs test/queue-drain.test.mjs
+```
+
 
 Tianshu Replica 是供短剧创作者在本机使用的 CLI：先根据原片提取创意、人物小传、分集大纲，再由天书依据这三份材料重写剧本；人物名字和细节允许略微迁移，身份关系、剧情骨架和已知事实保持对应。基于 [byfusion/TianshuAgent](https://github.com/byfusion/TianshuAgent)，本机负责流程和文件，文本创作由任务执行合同选定的远端 Kimi、DeepSeek 或 GPT 完成；前置素材提取独立选择入口和模型。
 

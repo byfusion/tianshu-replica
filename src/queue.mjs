@@ -4,6 +4,7 @@ import { spawn } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import { textModelForRun } from "./execution-contract.mjs";
 import { credentialsForTextModel } from "./model-profiles.mjs";
+import { mapConcurrent } from "./concurrency.mjs";
 
 const CLI_ENTRY = fileURLToPath(new URL("../bin/tianshu.mjs", import.meta.url));
 
@@ -11,6 +12,7 @@ const RUNNABLE = new Set(["approved", "screenplay_producing", "screenplay_review
 const PAUSED = new Map([["awaiting_approval", "awaiting_outline_approval"], ["needs_human_review", "needs_human_review"], ["awaiting_delivery_approval", "awaiting_delivery_approval"], ["delivered", "awaiting_producer_review"]]);
 const RESUMABLE_JOBS = new Set(["queued", "waiting_for_run_lock", "awaiting_outline_approval", "needs_human_review", "awaiting_delivery_approval"]);
 export const DEFAULT_DRAIN_MAX_JOBS = 10;
+export const DEFAULT_DRAIN_CONCURRENCY = 8;
 const now = () => new Date().toISOString();
 const queueDir = (root) => path.join(path.resolve(root), ".queue");
 const lockFile = (root) => path.join(queueDir(root), "worker.lock");
@@ -153,10 +155,10 @@ function environmentForJob(root, job, env) {
     error.code = "TIANSHU_MODEL_NOT_CONFIGURED";
     throw error;
   }
-  return { ...env, TIANSHU_MODEL: selected.family, TIANSHU_MODEL_PROVIDER: selected.provider, TIANSHU_MODEL_ID: selected.id, PI_CODING_AGENT_DIR: selected.agentDir };
+  return { ...env, TIANSHU_ROOT: path.resolve(root), TIANSHU_MODEL: selected.family, TIANSHU_MODEL_PROVIDER: selected.provider, TIANSHU_MODEL_ID: selected.id, PI_CODING_AGENT_DIR: selected.agentDir };
 }
 
-async function processQueuedJob(root, job, { execute, env }) {
+async function processQueuedJob(root, job, { execute, env, onSelected = () => {} }) {
   if (job.state === "running") {
     job.state = "failed";
     job.error = "worker ended before recording a result; usage may be unknown; explicit retry required";
@@ -182,12 +184,14 @@ async function processQueuedJob(root, job, { execute, env }) {
   let jobEnv;
   // Delivery runs the native local gate/export only; historical output can be
   // exported without binding a future model or configuring paid generation.
-  try { jobEnv = action === "deliver" ? { ...env } : environmentForJob(root, job, env); }
+  try { jobEnv = action === "deliver" ? { ...env, TIANSHU_ROOT: path.resolve(root) } : environmentForJob(root, job, env); }
   catch (error) {
+    onSelected();
     failJob(job, error);
     writeJob(root, job);
     return { selected: true, processed: false, action, job };
   }
+  onSelected();
   job.state = "running";
   job.startedAt = now();
   job.attempts += 1;
@@ -245,24 +249,30 @@ export async function runWorkerOnce(root, { execute = executeCli, env = process.
   });
 }
 
-export async function runWorkerDrain(root, { maxJobs = DEFAULT_DRAIN_MAX_JOBS, execute = executeCli, env = process.env } = {}) {
+export async function runWorkerDrain(root, { maxJobs = DEFAULT_DRAIN_MAX_JOBS, concurrency = DEFAULT_DRAIN_CONCURRENCY, execute = executeCli, env = process.env } = {}) {
   if (!Number.isSafeInteger(maxJobs) || maxJobs < 1) throw new Error("--max-jobs must be a finite positive safe integer");
+  if (!Number.isInteger(concurrency) || concurrency < 1 || concurrency > 8) throw new Error("--concurrency must be an integer from 1 to 8");
   return withWorker(root, async (resolvedRoot) => {
     // This snapshot bounds the drain and gives each job at most one attempt.
     // Newly enqueued jobs belong to the next invocation.
-    const snapshot = readJobs(resolvedRoot), results = [];
-    let selected = 0, processed = 0;
-    for (const { runId } of snapshot) {
-      if (selected >= maxJobs) break;
-      // Retain snapshot membership, but honor pauses or approvals recorded
-      // while earlier jobs were running.
-      const job = JSON.parse(fs.readFileSync(jobFile(resolvedRoot, runId), "utf8"));
-      const result = await processQueuedJob(resolvedRoot, job, { execute, env });
-      if (!result) continue;
-      results.push(result);
-      if (result.selected) selected++;
-      if (result.processed) processed++;
-    }
-    return { processed, selected, maxJobs, limitReached: selected >= maxJobs, results, jobs: readJobs(resolvedRoot) };
+    const snapshot = readJobs(resolvedRoot), results = new Array(snapshot.length);
+    let next = 0, selected = 0, processed = 0;
+    await mapConcurrent(Array.from({ length: Math.min(concurrency, snapshot.length) }), concurrency, async () => {
+      while (selected < maxJobs && next < snapshot.length) {
+        const index = next++, { runId } = snapshot[index];
+        // Re-read at dispatch so pauses recorded while other jobs run survive.
+        const job = JSON.parse(fs.readFileSync(jobFile(resolvedRoot, runId), "utf8"));
+        const result = await processQueuedJob(resolvedRoot, job, {
+          execute, env,
+          // Selection is reserved synchronously before execute's first await;
+          // concurrent lanes cannot spend the same remaining maxJobs budget.
+          onSelected: () => { selected++; },
+        });
+        if (!result) continue;
+        results[index] = result;
+        if (result.processed) processed++;
+      }
+    });
+    return { processed, selected, maxJobs, concurrency, limitReached: selected >= maxJobs, results: results.filter(Boolean), jobs: readJobs(resolvedRoot) };
   });
 }

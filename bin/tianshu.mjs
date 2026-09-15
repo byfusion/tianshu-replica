@@ -30,6 +30,8 @@ try {
     DATA_ROOT=path.resolve(value);
     rawArgs.splice(rootIndex,2);
   }
+  // Share the resolved CLI data root with every GPT session and source stage.
+  process.env.TIANSHU_ROOT=DATA_ROOT;
   [cmd,...args]=rawArgs;
   if(cmd==="extract-outline"||cmd==="extract-source"){
   const count=Number(flag("--episodes")||3);

@@ -15,6 +15,7 @@ import { isResegmentedReplication, episodeMapContext } from "./episode-map.mjs";
 import { executionContractStatus } from "./execution-contract.mjs";
 
 const ep = (value) => String(value).padStart(2, "0");
+const appendReviewEvent = (runDir, event) => fs.appendFileSync(path.join(runDir, "events.jsonl"), `${JSON.stringify({ at: new Date().toISOString(), ...event })}\n`);
 
 const findingShape = {
   id: Type.String({ minLength: 3 }),
@@ -206,7 +207,9 @@ async function reviewWindow(runDir, stage, from, to, contractText, cycle, previo
       name: "submit_review",
       label: "Submit window review",
       description: "Submit every real finding in this review window, including an explicit empty array when clean.",
-      parameters: Type.Object({ summary:Type.String({minLength:10}),episodeSummaries:Type.Array(episodeSummaryType,{minItems:to-from+1,maxItems:to-from+1}),findings: Type.Array(windowFindingType), candidateDispositions: Type.Optional(Type.Array(candidateDispositionType)) }),
+      // Keep the tool prefix identical for full and short final windows; the
+      // submission check below still requires this window's exact episode list.
+      parameters: Type.Object({ summary:Type.String({minLength:10}),episodeSummaries:Type.Array(episodeSummaryType,{minItems:1,maxItems:5}),findings: Type.Array(windowFindingType), candidateDispositions: Type.Optional(Type.Array(candidateDispositionType)) }),
       async execute(_id, params) {
         const expected=Array.from({length:to-from+1},(_,index)=>from+index),received=params.episodeSummaries.map((item)=>item.episode);if(expected.join(",")!==received.join(","))return {content:[{type:"text",text:"REJECTED episode summaries must cover the review window in order"}],details:{expected,received},terminate:false};
         for (const finding of params.findings) {
@@ -226,24 +229,30 @@ async function reviewWindow(runDir, stage, from, to, contractText, cycle, previo
       },
     });
     const role = `${stage}-window-review-${from}-${to}-cycle-${cycle}`;
-    const { session, metrics } = await createPiExperimentSession({
-      runDir,
-      role,
-      systemPrompt,
-      customTools: [submit],
-      toolNames: ["submit_review"],
-    });
-    let outcome = "completed";
+    const audit = { run: path.basename(runDir), role, stage, cycle, from, to };
+    let outcome = "failed", session, metrics;
+    appendReviewEvent(runDir, { type: "review_window_started", ...audit, outcome: "running" });
     try {
+      const created = await createPiExperimentSession({
+        runDir,
+        role,
+        systemPrompt,
+        customTools: [submit],
+        toolNames: ["submit_review"],
+      });
+      session = created.session;
+      metrics = created.metrics;
       await promptWithWatchdog(session, metrics, prompt, reviewTimeoutMs(manifest, "window"));
       assertReviewerSubmitted(submitted,`${stage} window Reviewer EP${from}-${to}`);
+      outcome = "completed";
       return {from,to,summary,episodeSummaries,findings,candidates,candidateDispositions,candidateSummary:candidateReviewSummary(candidates,candidateDispositions),artifactDigest:sha(payload)};
     } catch (error) {
       outcome = "failed";
       throw error;
     } finally {
-      session.dispose();
-      appendMetrics(runDir, role, metrics, outcome);
+      session?.dispose();
+      if (metrics) appendMetrics(runDir, role, metrics, outcome);
+      appendReviewEvent(runDir, { type: "review_window_finished", ...audit, outcome });
     }
   });
 }
@@ -328,7 +337,7 @@ export async function reviewStage(runDir, stage, { operatorNote = "" } = {}) {
   let windowReviews = [];
   if (stage !== "planning") {
     const windows = Array.from({ length: Math.ceil(manifest.episodes / 5) }, (_, index) => index * 5 + 1);
-    windowReviews = await mapConcurrent(windows, executionContractStatus(runDir).family === "deepseek" ? 8 : 1,
+    windowReviews = await mapConcurrent(windows, ["deepseek", "gpt"].includes(executionContractStatus(runDir).family) ? 8 : 1,
       (from) => reviewWindow(runDir, stage, from, Math.min(manifest.episodes, from + 4), contractText, cycle, previousCycle));
   }
   const windowFindings=windowReviews.flatMap((review)=>review.findings),finalReview = await reviewSeries(runDir, stage, windowReviews, finalContractText, cycle);
