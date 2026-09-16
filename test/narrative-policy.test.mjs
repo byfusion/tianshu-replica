@@ -11,6 +11,13 @@ import { inferMarketIntent } from "../src/market.mjs";
 
 const cases = [
   {
+    genre: "奇幻",
+    creative: "世界规则来自源对白：只有王族能听见幼龙的心声；主角先不知道自己能听见的原因。依据第1集00:12。",
+    characters: "Mara 是护士，Ivo 是有鳞片和双角的幼龙。第1集00:05 Mara 在医院穿白制服、持胸牌；00:35 已换成灰蓝长裙、胸牌放入箱中，手腕伤口仍在。Ivo 是否能变成人形未知。",
+    event: "00:12 守卫对 Mara 说：‘只有王族能听见他的心声。’这里的‘他’指 Ivo；Mara 对守卫说：‘可我听见了。’00:35 Mara 换装后抱起仍为幼龙的 Ivo。",
+    design: "保留心声规则、说话者和听者及 Mara 的反应；按源场景切换她的服装和持物，手腕伤口继续存在。Ivo 保持幼龙形态，变身能力未知。",
+  },
+  {
     genre: "亲情",
     creative: "看点是照顾逐渐赢得信任；误吞的危机不能覆盖照顾者接住孩子目光的情绪回报。",
     characters: "Ava 是照顾者；Knox 是幼龙。Ava 与 Knox 的血缘未确认。",
@@ -103,5 +110,31 @@ test("all review stages use evidence and local scope for narrative issues withou
     assert.match(prompt, /不要因单处台词或表演偏好拒绝整集/);
     assert.match(prompt, /目标 60–90 秒，常态 75 秒；硬范围 60–100 秒/);
     assert.match(prompt, /不通过加速口播、只缩数字或删核心戏压时长/);
+  }
+});
+
+test("source fidelity guidance preserves dialogue facts and evidence-backed scene states through every production role", (t) => {
+  const { dir, manifest, contract, input } = fixture(t, cases[0]);
+  const contexts = [
+    replicationPlannerContext(dir),
+    planningTaskPrompt(dir, contract, inferMarketIntent(input)),
+    replicationWriterContext(dir, 1),
+    storyboardSourceContext(dir, 1),
+    planningPayload(dir),
+    canonicalReviewContext(dir),
+  ];
+  for (const context of contexts) {
+    assert.match(context, /关键原句.*说话者.*说话对象/);
+    assert.match(context, /稳定身份.*场景状态/);
+    assert.match(context, /没有变化证据.*保持/);
+    assert.match(context, /物种.*形态.*变身.*源依据/);
+    assert.match(context, /自然转述.*不能.*信息/);
+  }
+  for (const stage of ["planning", "screenplay", "storyboard"]) {
+    const prompt = reviewPrompt(stage, "Frozen contract", manifest, contract);
+    assert.match(prompt, /关键原句.*说话者.*说话对象/);
+    assert.match(prompt, /当前场景.*服装.*伤势.*持物.*形态/);
+    assert.match(prompt, /没有变化证据.*保持/);
+    assert.match(prompt, /非阻断 P2/);
   }
 });

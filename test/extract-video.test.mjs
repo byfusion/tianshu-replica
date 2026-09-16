@@ -71,6 +71,39 @@ test("complete textual submit_source_materials preserves the observed three lite
   assert.equal(output.outline, materials(1).outline);
 });
 
+test("video source fidelity carries quoted rules and scene states without inventing a change", async (t) => {
+  const files = fixture(t, 2), calls = [];
+  const first = {
+    creative: "世界规则：只有王族能听见幼龙的心声，依据第1集00:12守卫对白。",
+    characters: "Mara为护士，医院中穿白制服并持胸牌；Ivo为有双角和鳞片的幼龙，变身能力未知。",
+    outline: "## 第1集\n00:12 守卫对Mara说‘只有王族能听见他的心声’，‘他’指Ivo；Mara回应守卫‘可我听见了’。",
+  };
+  const second = {
+    creative: first.creative,
+    characters: `${first.characters} 第2集00:05 Mara仍穿同一套制服；00:35画面明确已换灰蓝长裙，胸牌收入箱中；Ivo仍为幼龙。`,
+    outline: "## 第2集\n00:05 Mara仍穿白制服，00:35换装后抱起仍为幼龙的Ivo；变化原因未知。",
+  };
+  await extractVideoMaterials({ ...files, fetchImpl: async (_url, options) => {
+    const body = JSON.parse(options.body);
+    calls.push(body);
+    const output = calls.length === 1 ? first : second;
+    return new Response(JSON.stringify({ choices: [{ finish_reason: "tool_calls", message: { tool_calls: [{ type: "function", function: { name: "submit_source_materials", arguments: JSON.stringify(output) } }] } }] }));
+  } });
+  assert.equal(calls.length, 2, "one mocked request per source clip remains unchanged");
+  for (const body of calls) {
+    assert.match(body.messages[0].content, /关键原句.*说话者.*说话对象/);
+    assert.match(body.messages[0].content, /150–300.*只.*事件摘要/);
+    assert.match(body.messages[0].content, /关键原句与场景状态证据.*不受.*软目标/);
+    assert.match(body.messages[0].content, /稳定身份.*场景状态/);
+    assert.match(body.messages[0].content, /没有变化证据.*保持/);
+  }
+  assert.ok(calls[1].messages[1].content[0].text.includes(first.characters));
+  const output = JSON.parse(fs.readFileSync(files.outputPath, "utf8"));
+  assert.equal(output.creative, second.creative);
+  assert.equal(output.characters, second.characters);
+  assert.equal(output.outline, `${first.outline}\n\n${second.outline}`);
+});
+
 test("textual fallback rejects partial, extra or wrong-episode submissions", async () => {
   const { parseVideoSubmission } = await import("../src/extract-video.mjs");
   const text = textualResult(1).choices[0].message.content;

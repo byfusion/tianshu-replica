@@ -103,6 +103,35 @@ test("long sources use serial batches of three and consolidate only creative and
   assert.equal(result.metrics.usageTotal.totalTokens, 390);
 });
 
+test("text source fidelity retains quoted rules and scene states beyond the summary target through consolidation", async (t) => {
+  const files = workspace(t, 4), calls = [];
+  const evidence = "输入1：守卫对Mara说‘只有王族能听见他的心声’，‘他’指Ivo；Mara对守卫说‘可我听见了’。";
+  const states = "Mara的稳定身份是护士。输入1在医院穿白制服、持胸牌；输入4已穿灰蓝长裙，胸牌收入箱中，手腕伤口仍在。Ivo为有鳞片双角的幼龙，变身能力未知。";
+  const longEvidence = `${evidence}${"这是源文字中的世界规则依据。".repeat(30)}`;
+  fs.appendFileSync(files.sourcePath, `\n${longEvidence}\n${states}\n`);
+  const result = await extractSourceMaterials({ ...files, episodes: 4, sessionFactory: mockFactory(calls, async ({ options, from, to }) => {
+    const output = options.role === "source-identity-consolidation"
+      ? { creative: evidence, characters: states }
+      : { ...batch(from, to), creative: evidence, characters: states };
+    if (output.episodes) output.episodes[0].sourceEvidence.push(longEvidence);
+    await options.customTools[0].execute("submit", output);
+  }) });
+  const materials = loadSourceMaterials(result.outputPath, 4);
+  assert.equal(calls.length, 3, "existing batch and consolidation request count is unchanged");
+  for (const call of calls.slice(0, 2)) {
+    assert.match(call.systemPrompt, /关键原句.*说话者.*说话对象/);
+    assert.match(call.systemPrompt, /150–300.*只.*事件摘要/);
+    assert.match(call.systemPrompt, /关键原句与场景状态证据.*不受.*软目标/);
+    assert.match(call.systemPrompt, /稳定身份.*场景状态/);
+  }
+  assert.match(calls[2].systemPrompt, /保留.*关键原句.*场景状态/);
+  assert.ok(calls[2].prompt.includes(states));
+  assert.equal(materials.creative, evidence);
+  assert.equal(materials.characters, states);
+  assert.ok(materials.outline.includes(longEvidence));
+  assert.equal(materials.provenance.directVideoUnderstanding, false);
+});
+
 test("existing output and failed-attempt directories prohibit overwrite and a second charge", async (t) => {
   const files = workspace(t);
   const calls = [];
