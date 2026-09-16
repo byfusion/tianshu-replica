@@ -1,3 +1,6 @@
+import { episodeDurationPolicy } from "./production-contract.mjs";
+import { deliveryTiming } from "./delivery-timing.mjs";
+import { loadEpisodeMap } from "./episode-map.mjs";
 import fs from "node:fs";
 import path from "node:path";
 import { applyRepair, produceScripts, produceStoryboards, reviewScripts, reviewStoryboards, screenplayChecks, storyboardChecks } from "./agents.mjs";
@@ -84,6 +87,7 @@ export function assertContinuityChain(runDir, totalEpisodes) {
 
 export function deliveryGate(runDir) {
   const manifest = loadManifest(runDir);
+  loadEpisodeMap(runDir);
   const contract = loadProductionContract(runDir), contractDigest = productionContractDigest(contract);
   const marketFile = path.join(runDir, "canonical", "market.json"), marketContractFile = path.join(runDir, "canonical", "market-contract.md");
   if (!fs.existsSync(marketFile) || !fs.existsSync(marketContractFile)) throw new Error("missing market contract");
@@ -113,8 +117,12 @@ export function deliveryGate(runDir) {
     storyboard: assertFinalReview(runDir, "storyboard", contractDigest, marketDigest),
   };
   const markdown = markdownDelivery(runDir);
+  const timing = deliveryTiming(markdown), policy = episodeDurationPolicy(contract);
   const report = {
     ...deliveryScope(manifest),
+    ...(manifest.sourceEpisodes ? { sourceEpisodes: manifest.sourceEpisodes } : {}),
+    timing,
+    ...(contract.pacing ? { durationPolicy: policy, overTargetEpisodes: timing.episodes.filter((episode) => episode.seconds > policy.target.max) } : {}),
     passedAt: new Date().toISOString(),
     contractDigest,
     screenplayDigest: sha(screenplayDigests.join("\n")),

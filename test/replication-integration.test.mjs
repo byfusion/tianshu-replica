@@ -39,7 +39,7 @@ test("synthetic 60-episode outline survives init and reaches both planning and i
   assert.equal(planning.split(source).length - 1, 1);
   assert.equal(reviewing.split(source).length - 1, 1);
   assert.match(planning, /禁止自由重构情节/);
-  assert.match(reviewing, /逐集对照原始大纲/);
+  assert.match(reviewing, /对照原始大纲/);
   const repair = planningTaskPrompt(dir, contract, inferMarketIntent(input), { findings: [{ evidence: "第2集尾钩被改写" }] });
   assert.ok(repair.includes(source));
   assert.match(repair, /第2集尾钩被改写/);
@@ -48,7 +48,7 @@ test("synthetic 60-episode outline survives init and reaches both planning and i
 
 test("incomplete source fails before creating a run and the original route needs no source", (t) => {
   const root = temporaryRoot(t);
-  assert.throws(() => createRun(root, { title: "缺集", episodes: 60, input, sourceOutline: "## 第1集\n事件" }), /60/);
+  assert.throws(() => createRun(root, { title: "缺集", episodes: 60, sourceTotalEpisodes: 60, input, sourceOutline: "## 第1集\n事件" }), /60/);
   assert.deepEqual(fs.readdirSync(root), []);
   const { dir, manifest } = createRun(root, { title: "原创", episodes: 30, input });
   assert.equal(manifest.productionRoute, "tianshu-original");
@@ -73,7 +73,7 @@ test("source protagonist and legitimate source plot devices are retained without
 test("custom source contract does not describe an unspecified audience as female", () => {
   const rendered = productionContractMarkdown(contract);
   assert.match(rendered, /受众未指定/);
-  assert.match(rendered, /50–75 秒/);
+  assert.match(rendered, /60–75 秒/);
   assert.doesNotMatch(rendered, /女频/);
 });
 

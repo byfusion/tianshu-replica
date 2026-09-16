@@ -5,7 +5,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { execFileSync } from "node:child_process";
 import test from "node:test";
-import { createRun, loadManifest, saveManifest, renderDeliveryMarkdown } from "../src/core.mjs";
+import { createRun, loadManifest, saveManifest, renderDeliveryMarkdown, STORYBOARD_HEADER } from "../src/core.mjs";
 import { createProductionContract } from "../src/production-contract.mjs";
 import { planningSystemPrompt, planningTaskPrompt } from "../src/agents.mjs";
 import { planningPayload, reviewPrompt } from "../src/semantic-review.mjs";
@@ -23,13 +23,15 @@ function temporaryRoot(t) {
 }
 const sampleInput = { title: "范围验证", episodes: 3, input, sourceOutline: outline, sample: true, sourceTotalEpisodes: 50 };
 
-test("three episodes require explicit sample scope and planning/review retain an open ending", (t) => {
+test("sample scope stays fixed at three episodes and planning/review retain an open ending", (t) => {
   const root = temporaryRoot(t);
-  assert.throws(() => createRun(root, { ...sampleInput, sample: false }), /30 or 60/);
+  assert.throws(() => createRun(root, { ...sampleInput, sample: false, sourceOutline: undefined }), /30 or 60/);
+  assert.throws(() => createRun(root, { ...sampleInput, sample: false }), /source total|source.*cover|完整覆盖|源.*集/i);
   assert.throws(() => createRun(root, { ...sampleInput, episodes: 30 }), /exactly 3/);
   assert.throws(() => createRun(root, { ...sampleInput, sourceOutline: undefined }), /source outline/);
   const { dir, manifest } = createRun(root, sampleInput);
   assert.equal(manifest.state, "draft");
+  assert.equal(manifest.episodes, 3);
   assert.deepEqual(manifest.scope, { kind: "sample", sourceEpisodeRange: [1, 3], sourceTotalEpisodes: 50 });
   const usage = readRunMetrics(dir);
   assert.equal(usage.episodes, 3);
@@ -62,11 +64,19 @@ test("sample keeps the approval gate and all production stages while reporting o
   assert.equal(result.state, "ready_to_deliver");
   assert.equal(deliveryScope(result).isFullSeries, false);
   assert.equal(deliveryScope(result).episodes, 3);
-  const markdown = renderDeliveryMarkdown(result, ["第1集测试内容", "第2集测试内容", "第3集测试内容"]);
+  const boards = [1, 2, 3].map((episode) => [
+    `# 第${episode}集｜测试内容`,
+    `| ${STORYBOARD_HEADER.join(" | ")} |`,
+    `| ${STORYBOARD_HEADER.map(() => "---").join(" | ")} |`,
+    ...Array.from({ length: 12 }, (_, index) => `| ep0${episode}-s${String(index + 1).padStart(2, "0")} | 第${episode}集已有行动${index + 1} | 无台词 | 固定 / 中景 | 场景：旧店 | 音效：脚步 | 5 |`),
+  ].join("\n"));
+  const markdown = renderDeliveryMarkdown(result, boards);
   assert.match(markdown, /^# 【原剧第1–3集样例】/);
   assert.match(markdown, /交付范围：原剧第1–3集样例/);
   assert.match(markdown, /源剧总集数：50/);
-  assert.ok(markdown.endsWith("第3集测试内容"));
+  assert.match(markdown, /共 3 集、36 镜；镜头合计 180 秒/);
+  for (const episode of [1, 2, 3]) assert.ok(markdown.includes(`# 第 ${episode} 集｜测试内容｜预计 60 秒`));
+  assert.match(markdown, /ep03-s12 \| 第3集已有行动12/);
 });
 
 test("CLI preview reads text without creating extraction output or making a model call", (t) => {

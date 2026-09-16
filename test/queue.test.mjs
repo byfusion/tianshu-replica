@@ -6,15 +6,20 @@ import { execFileSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import test from "node:test";
 import { enqueueJob, queueStatus, resolveQueuedRun, retryJob, runWorkerOnce } from "../src/queue.mjs";
+import { writeExecutionContract } from "../src/execution-contract.mjs";
 
 function fixture(t, state = "approved", runId = "三集小样-1") {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "tianshu-queue-"));
   t.after(() => fs.rmSync(root, { recursive: true, force: true }));
   const directory = path.join(root, "runs", runId);
   fs.mkdirSync(directory, { recursive: true });
+  const agentDir = path.join(root, "credentials");
+  fs.mkdirSync(agentDir);
+  fs.writeFileSync(path.join(agentDir, "auth.json"), JSON.stringify({ "kimi-coding": { type: "api_key", key: "offline-test-key" } }));
+  writeExecutionContract(directory, { model: "kimi", agentDir });
   const setState = (value) => fs.writeFileSync(path.join(directory, "manifest.json"), JSON.stringify({ id: runId, state: value }));
   setState(state);
-  return { root, runId, directory, setState };
+  return { root, runId, directory, agentDir, setState };
 }
 
 test("empty queue exits without a child or Pi configuration", async (t) => {
@@ -114,12 +119,15 @@ test("returned and unknown states stop; absent explicit company configuration ca
     await runWorkerOnce(root, { execute: async () => assert.fail("unsupported state must not launch") });
     assert.equal(queueStatus(root).jobs[0].state, "stopped");
   }
-  const { root, runId } = fixture(t);
-  enqueueJob(root, runId);
-  const result = await runWorkerOnce(root, { env: {} });
-  assert.equal(result.job.state, "failed");
-  assert.equal(result.job.attempts, 0);
-  assert.match(result.job.error, /PI_CODING_AGENT_DIR/);
+  for (const state of ["approved", "planning"]) {
+    const { root, runId, agentDir } = fixture(t, state);
+    fs.unlinkSync(path.join(agentDir, "auth.json"));
+    enqueueJob(root, runId);
+    const result = await runWorkerOnce(root, { env: {} });
+    assert.equal(result.job.state, "failed");
+    assert.equal(result.job.attempts, 0);
+    assert.match(result.job.error, /PI_CODING_AGENT_DIR/);
+  }
 });
 
 test("run IDs cannot traverse outside runs", (t) => {

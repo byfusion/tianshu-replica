@@ -4,7 +4,8 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { appendRunMetrics, collectUsage, readRunMetrics, summarizePromptRequests, summarizeUsage } from "../src/metrics.mjs";
-import { promptWithWatchdog } from "../src/experiments/lib.mjs";
+import { ModelRuntime } from "@earendil-works/pi-coding-agent";
+import { collectModelError, piModelSelection, promptWithWatchdog } from "../src/experiments/lib.mjs";
 
 const zero = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 0 };
 const event = (usage) => ({ type: "message_end", message: { role: "assistant", usage } });
@@ -212,6 +213,27 @@ test("model-error retries retain each session prompt outcome and its recorded me
   assert.equal(requests.errorAttempts, 2);
 });
 
+test("model errors retain the reason while redacting the selected auth key before truncation", (t) => {
+  const dir = temporaryRun(t);
+  const key = "offline-company-api-key";
+  fs.writeFileSync(path.join(dir, "auth.json"), JSON.stringify({ "kimi-coding": { type: "api_key", key } }));
+  const previous = process.env.PI_CODING_AGENT_DIR;
+  process.env.PI_CODING_AGENT_DIR = dir;
+  t.after(() => { if (previous === undefined) delete process.env.PI_CODING_AGENT_DIR; else process.env.PI_CODING_AGENT_DIR = previous; });
+  const metrics = promptMetrics();
+  collectModelError(metrics, event(zero));
+  assert.equal(metrics.modelErrors.length, 0);
+  const prefix = `401 invalid API key: ${key}; `;
+  const reason = `${prefix}${"x".repeat(1990 - prefix.length)}${key}${"y".repeat(100)}`;
+  collectModelError(metrics, { type: "message_end", message: { role: "assistant", stopReason: "error", errorMessage: reason } });
+  assert.match(metrics.modelErrors[0].errorMessage, /^401 invalid API key: \[REDACTED\];/);
+  assert.equal(metrics.modelErrors[0].errorMessage.length, 2000);
+  appendRunMetrics(dir, "planner", metrics, "failed");
+  const saved = fs.readFileSync(path.join(dir, "metrics", "planner.json"), "utf8");
+  assert.ok(!saved.includes(key));
+  assert.ok(!saved.includes("offline-company"));
+});
+
 test("legacy or unfinished prompts do not become complete from message coverage", () => {
   const metrics = promptMetrics();
   collectUsage(metrics, event(zero));
@@ -223,4 +245,101 @@ test("legacy or unfinished prompts do not become complete from message coverage"
   const pending = summarizePromptRequests(metrics);
   assert.equal(pending.status, "unknown");
   assert.equal(pending.unfinishedAttempts, 1);
+});
+
+
+test("a confirmed monthly quota error stops without repeating the model request", async () => {
+  const metrics = promptMetrics();
+  let calls = 0;
+  const session = { prompt: async () => {
+    calls++;
+    metrics.modelErrors.push({ stopReason: "error", errorMessage: "403: You've reached your monthly usage limit for this billing cycle." });
+  }, abort: async () => {} };
+  await assert.rejects(promptWithWatchdog(session, metrics, "existing planning task"), /request rejected/);
+  assert.equal(calls, 1);
+  assert.equal(metrics.promptAttempts.length, 1);
+});
+
+
+test("an invalid request stops without repeating the same rejected payload", async () => {
+  const metrics = promptMetrics();
+  let calls = 0;
+  const session = { prompt: async () => {
+    calls++;
+    metrics.modelErrors.push({ stopReason: "error", errorMessage: "400: role developer is not allowed" });
+  }, abort: async () => {} };
+  await assert.rejects(promptWithWatchdog(session, metrics, "existing planning task"), /request rejected/);
+  assert.equal(calls, 1);
+});
+
+test("the selected DeepSeek model loads from an isolated Pi config and keeps tool replay compatible", async (t) => {
+  assert.deepEqual(piModelSelection({}), { provider: "kimi-coding", id: "k3-256k" });
+  const selected = piModelSelection({ TIANSHU_MODEL_PROVIDER: "deepseek", TIANSHU_MODEL_ID: "deepseek-flash" });
+  const dir = temporaryRun(t);
+  const modelsPath = path.join(dir, "models.json");
+  fs.writeFileSync(modelsPath, JSON.stringify({ providers: { deepseek: {
+    baseUrl: "https://api.deepseek.com",
+    api: "openai-completions",
+    models: [{
+      id: "deepseek-flash", name: "DeepSeek Flash", reasoning: true,
+      input: ["text", "image"], contextWindow: 1000000, maxTokens: 393216,
+      cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+      compat: { supportsStore: false, supportsDeveloperRole: false, maxTokensField: "max_tokens", requiresReasoningContentOnAssistantMessages: true, thinkingFormat: "deepseek" },
+    }],
+  } } }));
+  const runtime = await ModelRuntime.create({ modelsPath, authPath: path.join(dir, "auth.json"), refreshOnCreate: false });
+  const model = runtime.getModel(selected.provider, selected.id);
+  assert.equal(model?.id, "deepseek-flash");
+  assert.equal(model?.provider, "deepseek");
+  assert.ok(runtime.getModel("kimi-coding", "k3-256k"));
+  assert.equal(runtime.getModel("deepseek", "nonexistent-model"), undefined);
+  const messages = [
+    { role: "user", content: "Read the fixture", timestamp: 1 },
+    { role: "assistant", api: model.api, provider: model.provider, model: model.id, content: [
+      { type: "thinking", thinking: "Read source evidence first.", thinkingSignature: "reasoning_content" },
+      { type: "toolCall", id: "fixture_call", name: "read_source", arguments: { episode: 1 } },
+    ], stopReason: "toolUse", usage: zero, timestamp: 2 },
+    { role: "toolResult", toolCallId: "fixture_call", toolName: "read_source", content: [{ type: "text", text: "Offline source fixture" }], isError: false, timestamp: 3 },
+  ];
+  let payload;
+  let fetchCalls = 0;
+  const result = await runtime.completeSimple(model, { systemPrompt: "Use source evidence.", messages, tools: [{ name: "read_source", description: "Read an episode", parameters: { type: "object", properties: { episode: { type: "number" } }, required: ["episode"] } }] }, {
+    apiKey: "offline-fixture-key", reasoning: "off", maxTokens: 256,
+    onPayload: (value) => { payload = value; throw new Error("offline payload captured before network"); },
+    fetch: async () => { fetchCalls += 1; throw new Error("network prohibited in offline fixture"); },
+  });
+  assert.equal(fetchCalls, 0);
+  assert.match(result.errorMessage, /offline payload captured before network/);
+  assert.equal(payload.model, "deepseek-flash");
+  assert.deepEqual(payload.thinking, { type: "disabled" });
+  assert.equal(payload.reasoning_effort, undefined);
+  assert.equal(payload.max_tokens, 256);
+  assert.equal(payload.max_completion_tokens, undefined);
+  assert.equal(payload.store, undefined);
+  assert.equal(payload.messages[0].role, "system");
+  assert.equal(payload.tools[0].function.name, "read_source");
+  const assistant = payload.messages.find((message) => message.role === "assistant");
+  assert.equal(assistant.reasoning_content, "Read source evidence first.");
+  assert.equal(assistant.tool_calls[0].function.name, "read_source");
+  const tool = payload.messages.find((message) => message.role === "tool");
+  assert.equal(tool.tool_call_id, assistant.tool_calls[0].id);
+});
+
+test("DeepSeek environment credentials are redacted from stored model errors", (t) => {
+  const dir = temporaryRun(t);
+  fs.writeFileSync(path.join(dir, "auth.json"), "{}");
+  const previousDir = process.env.PI_CODING_AGENT_DIR;
+  const previousKey = process.env.DEEPSEEK_API_KEY;
+  process.env.PI_CODING_AGENT_DIR = dir;
+  process.env.DEEPSEEK_API_KEY = "offline-deepseek-secret";
+  t.after(() => {
+    if (previousDir === undefined) delete process.env.PI_CODING_AGENT_DIR; else process.env.PI_CODING_AGENT_DIR = previousDir;
+    if (previousKey === undefined) delete process.env.DEEPSEEK_API_KEY; else process.env.DEEPSEEK_API_KEY = previousKey;
+  });
+  const metrics = promptMetrics();
+  collectModelError(metrics, { type: "message_end", message: { role: "assistant", stopReason: "error", errorMessage: "401 invalid API key: offline-deepseek-secret" } });
+  appendRunMetrics(dir, "planner", metrics, "failed");
+  const saved = fs.readFileSync(path.join(dir, "metrics", "planner.json"), "utf8");
+  assert.ok(!saved.includes("offline-deepseek-secret"));
+  assert.equal(metrics.modelErrors[0].errorMessage, "401 invalid API key: [REDACTED]");
 });
