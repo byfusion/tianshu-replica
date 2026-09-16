@@ -5,6 +5,7 @@ import test from "node:test";
 import { commitContinuityReview, observedSnapshotReferences, reviewContinuityUpdate } from "../src/continuity.mjs";
 import { Type, Compile, defineTool } from "../src/experiments/lib.mjs";
 import { parseSourceOutline } from "../src/replication.mjs";
+import { buildContinuityTaskPrompt } from "../src/agent-prompts.mjs";
 
 function offlineContinuity(snapshot, action, note = null, episode = 19, approvedEpisodeText = "本集已批准计划：核对角色与物件的实际状态变化。") {
   const root = "/offline-continuity", writes = [], metrics = [];
@@ -21,6 +22,8 @@ function offlineContinuity(snapshot, action, note = null, episode = 19, approved
   });
   const review = vm.runInNewContext(`(${reviewContinuityUpdate.toString()})`, {
     episodeMapContext: () => "",
+    buildContinuityTaskPrompt,
+    replicationCharacterContext: () => "",
     Type, defineTool, path, parseSourceOutline, observedSnapshotReferences, process: { env: { TIANSHU_MODEL_PROVIDER: "deepseek" } },
     fs: { existsSync: (file) => note !== null && file === `${root}/work/continuity-notes.txt` },
     readJson: (file) => { assert.equal(file, `${root}/manifest.json`); return { episodes: 32 }; },

@@ -117,7 +117,8 @@ test("screenplay and storyboard share evidence and source uncertainty boundaries
     const prompt = reviewPrompt(stage, "production contract");
     assert.match(prompt, /须保留已给出的原句信息、说话对应和有据场景状态，不以逐字相同为硬门/);
     assert.match(prompt, /相同台词、类似音效、服装颜色或外貌相似均不能单独证明同一时刻或同一人物/);
-    assert.match(prompt, /源稿未确认的人物映射、关系或画外过程须保留未知/);
+    assert.match(prompt, /尚未得到证据解决的人物映射、关系或画外过程须保留未知/);
+    assert.match(prompt, /不能要求每场重新点名才能沿用已知制作身份/);
     assert.match(prompt, /不得要求新增未获大纲支持的画外事件来补齐因果/);
     assert.match(prompt, /真实非阻断问题可由终审标为 accepted_non_blocking/);
   }

@@ -19,6 +19,7 @@ import { assertContinuityChain } from "../src/runtime.mjs";
 import { produceScripts } from "../src/agents.mjs";
 import { Type, defineTool } from "../src/experiments/lib.mjs";
 import { parseSourceOutline } from "../src/replication.mjs";
+import { buildContinuityTaskPrompt } from "../src/agent-prompts.mjs";
 import { agentFixture } from "./helpers/agent-fixtures.mjs";
 
 async function capturedDynamicSnapshots(t, snapshot) {
@@ -55,6 +56,8 @@ async function capturedDynamicSnapshots(t, snapshot) {
       defineTool,
       path,
       parseSourceOutline,
+      buildContinuityTaskPrompt,
+      replicationCharacterContext: () => "",
       observedSnapshotReferences,
       fs: { existsSync: () => false },
       process: { env: { TIANSHU_MODEL_PROVIDER: "deepseek" } },

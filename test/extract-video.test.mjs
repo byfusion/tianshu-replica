@@ -104,6 +104,44 @@ test("video source fidelity carries quoted rules and scene states without invent
   assert.equal(output.outline, `${first.outline}\n\n${second.outline}`);
 });
 
+test("video requests carry only the preceding scene evidence alongside accepted identities", async (t) => {
+  const files = fixture(t, 3), calls = [];
+  const first = {
+    creative: "家人受伤后的追责。",
+    characters: "Noah与Nina为兄妹；Eve在审判台戴面具，厅外对丈夫Noah卸下面具微笑，依据第1集。",
+    outline: "## 第1集\n00:55 雨巷里Noah扶住受伤妹妹Nina；握住她左腕红绳的手停在镜头中心。",
+  };
+  const second = {
+    creative: first.creative,
+    characters: `${first.characters} 第2集黑衣男子→Noah、受伤女子→Nina，依据第1集末与第2集开头同一红绳、手部动作及妹妹称呼的连续场景。`,
+    outline: "## 第2集\n00:00 同一只手继续扶住Nina，Noah呼喊妹妹后被警员拉开。00:50 Noah进入警局。",
+  };
+  const third = {
+    creative: first.creative,
+    characters: `${second.characters} 第3集登记台另一名黑衣男子与Noah同时出现、各自登记，是另一人，姓名和关系未知。`,
+    outline: "## 第3集\n00:05 Noah与另一名同穿黑衣的男子同时登记；陌生男子没有被叫出姓名。",
+  };
+  const responses = [first, second, third];
+  await extractVideoMaterials({ ...files, fetchImpl: async (_url, options) => {
+    const body = JSON.parse(options.body), index = calls.length;
+    calls.push(body);
+    const text = body.messages[1].content[0].text;
+    const match = text.match(/【前一段大纲边界参考数据】\n([^\n]+)\n【边界参考数据结束】/);
+    assert.ok(match, "actual provider request must carry the immediately preceding scene evidence");
+    assert.equal(JSON.parse(match[1]), index === 0 ? "" : responses[index - 1].outline);
+    if (index > 0) assert.ok(text.includes(responses[index - 1].characters));
+    if (index === 2) assert.ok(!text.includes(JSON.stringify(first.outline)), "do not resend the entire outline history");
+    assert.match(body.messages[0].content, /服装、外貌或相似台词不能单独证明同一人/);
+    assert.match(body.messages[0].content, /当前大纲同样沿用/);
+    return new Response(JSON.stringify({ choices: [{ finish_reason: "tool_calls", message: { tool_calls: [{ type: "function", function: { name: "submit_source_materials", arguments: JSON.stringify(responses[index]) } }] } }] }));
+  } });
+  const output = JSON.parse(fs.readFileSync(files.outputPath, "utf8"));
+  assert.equal(calls.length, 3);
+  assert.equal(output.characters, third.characters);
+  assert.match(output.characters, /另一人，姓名和关系未知/);
+  assert.equal(output.outline, responses.map((item) => item.outline).join("\n\n"));
+});
+
 test("textual fallback rejects partial, extra or wrong-episode submissions", async () => {
   const { parseVideoSubmission } = await import("../src/extract-video.mjs");
   const text = textualResult(1).choices[0].message.content;

@@ -44,6 +44,27 @@ export function buildWriterTaskPrompt({
   ].join("");
 }
 
+export function buildContinuityTaskPrompt({
+  context,
+  approvedOutline,
+  sourceMap,
+  characterContext,
+  proposedUpdate,
+  episode,
+  screenplay,
+  noteContext,
+}) {
+  return [
+    `静态连续性合同：\n${context.contract.slice(0, 18000)}`,
+    `本集已批准大纲：\n${approvedOutline}`,
+    sourceMap,
+    characterContext,
+    `上一集动态快照：\n${context.current.snapshot}`,
+    `Writer 提交的本集变化：\n${proposedUpdate}`,
+    `第 ${episode} 集正式剧本：\n${screenplay.slice(0, 32000)}${noteContext}`,
+  ].filter(Boolean).join("\n\n");
+}
+
 export function buildStoryboardSystemPrompt(contractText, productionRoute) {
   return [
     `你是天书分镜导演。`,

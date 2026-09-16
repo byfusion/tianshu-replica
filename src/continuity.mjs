@@ -3,7 +3,8 @@ import path from "node:path";
 import { Type, createPiExperimentSession, defineTool, promptWithWatchdog } from "./experiments/lib.mjs";
 import { readJson, readText, sha, writeJson, writeText } from "./core.mjs";
 import { appendRunMetrics } from "./metrics.mjs";
-import { parseSourceOutline } from "./replication.mjs";
+import { parseSourceOutline, replicationCharacterContext } from "./replication.mjs";
+import { buildContinuityTaskPrompt } from "./agent-prompts.mjs";
 import { episodeMapContext } from "./episode-map.mjs";
 
 const ep = (episode) => String(episode).padStart(2, "0");
@@ -205,6 +206,7 @@ export async function reviewContinuityUpdate(runDir, { episode, screenplay, prop
   const context = continuityContext(runDir);
   const approvedOutline = parseSourceOutline(readText(path.join(runDir, "canonical", "outline.md")), readJson(path.join(runDir, "manifest.json")).episodes).episodes[episode - 1].text;
   const sourceMap = episodeMapContext(runDir,episode);
+  const characterContext = replicationCharacterContext(runDir);
   let submitted = null, submissionMode = null;
   const confirmedAppend = (snapshot, approvedUpdate, extra = "") => `${snapshot.endsWith("\n") ? "" : "\n"}【第${episode}集确认变化】\n${approvedUpdate}${extra ? `\n${extra}` : ""}`;
   const invalidField = (value, minimum) => String(value ?? "").trim().length < minimum || /^(?:placeholder|待补充|同上)$/i.test(String(value ?? "").trim());
@@ -280,7 +282,9 @@ export async function reviewContinuityUpdate(runDir, { episode, screenplay, prop
   });
   let outcome = "completed";
   try {
-    await promptWithWatchdog(session, metrics, `静态连续性合同：\n${context.contract.slice(0, 18000)}\n\n本集已批准大纲：\n${approvedOutline}\n\n${sourceMap}\n\n上一集动态快照：\n${context.current.snapshot}\n\nWriter 提交的本集变化：\n${proposedUpdate}\n\n第 ${episode} 集正式剧本：\n${screenplay.slice(0, 32000)}${noteContext}`, 240_000);
+    await promptWithWatchdog(session, metrics, buildContinuityTaskPrompt({
+      context, approvedOutline, sourceMap, characterContext, proposedUpdate, episode, screenplay, noteContext,
+    }), 240_000);
     if (!submitted) throw new Error("continuity agent did not submit a review");
     const result = commitContinuityReview(runDir, { episode, screenplay, proposedUpdate, review: submitted });
     if (!result.accepted) {

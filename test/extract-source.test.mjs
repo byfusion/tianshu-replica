@@ -132,6 +132,63 @@ test("text source fidelity retains quoted rules and scene states beyond the summ
   assert.equal(materials.provenance.directVideoUnderstanding, false);
 });
 
+test("later text requests receive accepted identities and adjacent evidence across named and anonymous segments", async (t) => {
+  const files = workspace(t, 7), calls = [];
+  const segments = [
+    "Eve戴面具站在审判台上，众人起立；离开大厅后，她对丈夫Noah卸下面具微笑。",
+    "Noah介绍妹妹Nina，兄妹在家中一起抱着幼犬。",
+    "雨巷。Noah扶着受伤的Nina，握住她左腕的红绳；她浅灰外套胸前染血。镜头停在他的手。",
+    "镜头承接红绳和同一只手。黑衣男子继续扶着浅灰外套的受伤女子，呼喊‘妹妹，醒醒’，警员伸手拉他。",
+    "同一雨巷，警员把男子拉离女子身边，男子质问来人。",
+    "Noah走进警局，与一名同穿黑衣的陌生男子同时出现在登记台两侧；两人各自登记。",
+    "陌生黑衣男子离开登记台。无人叫出他的名字，文本没有给出他与Noah的关系。",
+  ];
+  fs.writeFileSync(files.sourcePath, segments.map((text, index) => `## 第${index + 1}集\n${text}`).join("\n\n"));
+  const firstCharacters = "Eve为Noah的妻子；面具、审判台与厅外温柔相对照，依据输入1。Noah与Nina为兄妹；雨巷握红绳、浅灰外套染血，依据输入2–3。";
+  const mappedCharacters = `${firstCharacters} 输入4黑衣男子→Noah、受伤女子→Nina，依据输入3–4同一红绳、手部镜头及兄妹称呼的连续动作。输入6陌生黑衣男子与Noah同镜分别登记，是另一人，姓名未知。`;
+  const result = await extractSourceMaterials({ ...files, episodes: 7, sessionFactory: mockFactory(calls, async ({ options, from, to, call }) => {
+    if (options.role === "source-identity-consolidation") {
+      assert.ok(call.prompt.includes(mappedCharacters));
+      assert.match(options.systemPrompt, /早期“未知”后来已有证据解决时/);
+      await options.customTools[0].execute("submit", { creative: "家人受伤后的追责。", characters: mappedCharacters });
+      return;
+    }
+    const match = call.prompt.match(/【身份与边界参考数据开始】\n([^\n]+)\n【身份与边界参考数据结束】/);
+    assert.ok(match, "actual extraction request must include the accepted identity and boundary context");
+    const context = JSON.parse(match[1]);
+    assert.match(options.systemPrompt, /服装、外貌或相似台词不能单独证明同一人/);
+    if (from === 1) {
+      assert.equal(context.acceptedCharacters, "");
+      assert.deepEqual(context.adjacentSegments.map((item) => item.episode), [4]);
+      assert.ok(context.adjacentSegments[0].text.includes(segments[3]));
+    } else if (from === 4) {
+      assert.equal(context.acceptedCharacters, firstCharacters);
+      assert.deepEqual(context.adjacentSegments.map((item) => item.episode), [3, 7]);
+      assert.ok(context.adjacentSegments[0].text.includes(segments[2]));
+      assert.match(context.adjacentSegments[0].reference, /source\.md:/);
+      assert.ok(call.prompt.includes(segments[3]), "current anonymous scene reaches the same request as its named boundary");
+      assert.ok(call.prompt.includes(segments[5]), "same-clothes distinct people remain available as contrary evidence");
+    } else {
+      assert.equal(context.acceptedCharacters, mappedCharacters, "the next batch receives the accepted mapping, including unresolved separate people");
+      assert.deepEqual(context.adjacentSegments.map((item) => item.episode), [6]);
+      assert.ok(context.adjacentSegments[0].text.includes(segments[5]));
+    }
+    const output = { ...batch(from, to), characters: from === 1 ? firstCharacters : mappedCharacters };
+    if (from === 4) {
+      output.episodes[0].coreEvents = ["Noah继续扶着妹妹Nina，随后被警员拉开。"];
+      output.episodes[0].sourceEvidence = ["输入3–4：握红绳的手部镜头连续，男子呼喊妹妹。"];
+    }
+    if (from === 7) output.episodes[0].uncertainties = ["陌生黑衣男子是另一人，姓名和与Noah的关系未知。"];
+    await options.customTools[0].execute("submit", output);
+  }) });
+  const materials = loadSourceMaterials(result.outputPath, 7);
+  assert.deepEqual(calls.map((call) => call.role), ["source-extractor-1-3", "source-extractor-4-6", "source-extractor-7-7", "source-identity-consolidation"]);
+  assert.match(materials.outline, /Noah继续扶着妹妹Nina/);
+  assert.match(materials.outline, /陌生黑衣男子是另一人，姓名和与Noah的关系未知/);
+  assert.equal(materials.characters, mappedCharacters);
+  assert.match(materials.characters, /面具、审判台与厅外温柔相对照/);
+});
+
 test("existing output and failed-attempt directories prohibit overwrite and a second charge", async (t) => {
   const files = workspace(t);
   const calls = [];

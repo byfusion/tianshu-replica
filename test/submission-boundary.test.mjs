@@ -254,6 +254,7 @@ test("Storyboard source context includes full identity and current episode sourc
   assert.ok(result.includes("身份资料".repeat(4000) + "\n四子的姓名归属仍未知。"));
   assert.match(result, /静态事实：仅救当前幼龙/);
   assert.match(result, /源事件1：开场当前事实/);
-  assert.match(result, /源材料未确认的别名映射/);
+  assert.match(result, /尚未得到证据解决的别名映射/);
+  assert.match(result, /不被早期未知记录或后段局部标签覆盖/);
   assert.doesNotMatch(result, /源事件32|EP32未来动态事实/);
 });
